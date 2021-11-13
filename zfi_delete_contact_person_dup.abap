@@ -1,5 +1,9 @@
 REPORT zfi_delete_contact_person_dup MESSAGE-ID >0 .
 
+
+TABLES:
+  indx .
+
 *----------------------------------------------------------------------*
 *       CLASS lcl_local DEFINITION
 *----------------------------------------------------------------------*
@@ -27,6 +31,16 @@ CLASS zclfi_remove_cp_dup DEFINITION FINAL CREATE PUBLIC .
     METHODS process
       IMPORTING
         !iv_testrun TYPE abap_bool DEFAULT '' .
+
+    METHODS prepare_bg
+      IMPORTING
+        !iv_testrun  TYPE abap_bool DEFAULT ''
+        !iv_pathfile TYPE string .
+
+    METHODS process_bg
+      IMPORTING
+        !iv_testrun TYPE abap_bool DEFAULT ''
+        !iv_indxkey TYPE indx-srtfd .
 
     METHODS log_add
       IMPORTING
@@ -101,7 +115,9 @@ CLASS zclfi_remove_cp_dup DEFINITION FINAL CREATE PUBLIC .
 
     CONSTANTS:
       gc_object    TYPE balobj_d  VALUE 'ZFI',
-      gc_subobject TYPE balsubobj VALUE 'ZFI_DEL_CP'.
+      gc_subobject TYPE balsubobj VALUE 'ZFI_DEL_CP',
+      gc_c_table   TYPE char2 VALUE '·T',
+      gc_c_range   TYPE char2 VALUE '·R'.
 
     DATA:
       go_log      TYPE REF TO zcls_fi_ic_logger,
@@ -110,9 +126,21 @@ CLASS zclfi_remove_cp_dup DEFINITION FINAL CREATE PUBLIC .
       gt_messages TYPE bapiret2_t,
       gv_handle   TYPE c.
 
-*    CLASS-METHODS get_jobname
-*      RETURNING
-*        VALUE(rv_value) TYPE tbtcjob-jobname .
+    METHODS memory_export
+      RETURNING
+        VALUE(rv_value) TYPE indx-srtfd .
+
+    METHODS memory_import
+      IMPORTING
+        iv_indxkey TYPE indx-srtfd .
+
+    METHODS memory_delete
+      IMPORTING
+        iv_indxkey TYPE indx-srtfd .
+
+    METHODS get_jobname
+      RETURNING
+        VALUE(rv_value) TYPE tbtcjob-jobname .
 
 ENDCLASS.
 
@@ -126,8 +154,6 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
     CLEAR:
       me->gt_range_bp, me->gt_data, me->gv_handle, me->gt_messages, me->go_log .
 
-    BREAK-POINT .
-
     me->go_log = NEW zcls_fi_ic_logger( iv_object     = me->gc_object
                                         iv_sub_object = me->gc_subobject ) .
 
@@ -136,19 +162,19 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
 
   METHOD get_filepath.
 
-    DATA: lt_filetable TYPE filetable,
-          lv_rc        TYPE i.
+    DATA:
+      lt_filetable TYPE filetable,
+      lv_rc        TYPE i.
 
     cl_gui_frontend_services=>file_open_dialog(
       CHANGING
         file_table              = lt_filetable
         rc                      = lv_rc  ##FM_SUBRC_OK
-*      EXCEPTIONS
-*        file_open_dialog_failed = 1
-*        cntl_error              = 2
-*        error_no_gui            = 3
-*        not_supported_by_gui    = 4
-    ).
+      EXCEPTIONS
+        file_open_dialog_failed = 1
+        cntl_error              = 2
+        error_no_gui            = 3
+        not_supported_by_gui    = 4 ) .
 
     READ TABLE lt_filetable INDEX 1 INTO DATA(ls_filetable).
     IF sy-subrc EQ 0.
@@ -368,9 +394,10 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
               me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>success
                                               id         = '>0'
                                               number     = 0
-                                              message_v1 = 'BP'
-                                              message_v2 = CONV #( ls_data-partner1 )
-                                              message_v3 = 'has been updated as successful.' ) ) .
+                                              message_v1 = |'BP' { CONV symsgv( ls_data-partner1 ) }|
+                                              message_v2 = |and BP CP { ls_data-partner2 ALPHA = OUT }|
+                                              message_v3 = 'has been updated successfully.' ) ) .
+*                                             message_v3 = 'has been updated as successful.' ) ) .
             ENDIF .
 
           ENDIF .
@@ -392,8 +419,177 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
         CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' .
       ENDIF.
 
+    ELSE .
+      me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>warning
+                                      id         = '>0'
+                                      number     = 0
+                                      message_v1 = 'There are no valid data.' ) ) .
+
+    ENDIF .
+
+    IF ( me->go_log IS BOUND ) .
+      me->go_log->persist_data( ).
+    ENDIF .
+
+  ENDMETHOD .
+
+
+  METHOD prepare_bg .
+
+    DATA:
+      lv_count TYPE tbtcjob-jobcount,
+      lv_debug TYPE char1 VALUE 'X'.
+
+    DATA(lv_indxkey) = me->memory_export( ) .
+    DATA(lv_jobname) = me->get_jobname( ) .
+
+    CALL FUNCTION 'JOB_OPEN'
+      EXPORTING
+        jobname          = lv_jobname
+      IMPORTING
+        jobcount         = lv_count
+      EXCEPTIONS
+        cant_create_job  = 1
+        invalid_job_data = 2
+        jobname_missing  = 3
+        OTHERS           = 4.
+
+    IF ( sy-subrc EQ 0 ) .
+
+*     SUBMIT  zsd_mr21_create_mass_job
+      SUBMIT  yteste
+      WITH    p_flpath   = iv_pathfile
+      WITH    p_test     = iv_testrun
+      WITH    p_key      = lv_indxkey
+      WITH    p_debug    = lv_debug
+      VIA JOB lv_jobname
+      NUMBER  lv_count
+      AND RETURN .
+
+      CALL FUNCTION 'JOB_CLOSE'
+        EXPORTING
+          jobcount             = lv_count
+          jobname              = lv_jobname
+          sdlstrtdt            = sy-datum
+          sdlstrttm            = sy-uzeit
+        EXCEPTIONS
+          cant_start_immediate = 1
+          invalid_startdate    = 2
+          jobname_missing      = 3
+          job_close_failed     = 4
+          job_nosteps          = 5
+          job_notex            = 6
+          lock_failed          = 7
+          invalid_target       = 8
+          invalid_time_zone    = 9
+          OTHERS               = 10.
+
       IF ( me->go_log IS BOUND ) .
-        me->go_log->persist_data( ).
+
+        IF ( sy-subrc EQ 0 ) .
+
+          me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>info
+                                          id         = '>0'
+                                          number     = 0
+                                          message_v1 = 'The records will be processed in the background.' ) ) .
+
+        ELSE .
+          me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>error
+                                          id         = '>0'
+                                          number     = 0
+                                          message_v1 = 'The schedule job will not be created.' ) ) .
+        ENDIF.
+
+        me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>info
+                                        id         = '>0'
+                                        number     = 0
+                                        message_v1 = 'File:'
+                                        message_v2 = CONV #( iv_pathfile ) ) ) .
+
+
+        me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>info
+                                        id         = '>0'
+                                        number     = 0
+                                        message_v1 = 'Job:'
+                                        message_v2 = CONV #( lv_jobname ) ) ) .
+      ENDIF .
+
+    ENDIF .
+
+
+
+*    TYPES :
+*      BEGIN OF t_serialno,
+*        equnr TYPE equnr,
+*      END OF t_serialno.
+*    DATA:
+*      int_serialno TYPE TABLE OF t_serialno,
+*      int_temp     TYPE TABLE OF riequi,
+*      wa_serialno  TYPE t_serialno,
+*      wa_temp      TYPE riequi,
+*      indxkey      TYPE indx-srtfd,
+*      wf_obj       TYPE REF TO cl_abap_expimp_db.
+*
+*" Get serial numbers in separate internal table
+*    REFRESH int_temp.
+*    int_temp[] = int_equi[].
+*
+*    LOOP AT int_temp INTO wa_temp.
+*      wa_serialno-equnr = wa_temp-equnr.
+*      APPEND wa_serialno TO int_serialno.
+*      CLEAR : wa_serialno,
+*      wa_temp.
+*    ENDLOOP.
+*
+*    IF int_serialno[] IS NOT INITIAL.
+*" Begin of changes by POGUSANR as on 03/17/2009
+*      READ TABLE int_equi INDEX 1.
+*      CONCATENATE int_equi-matnr 'MIGO'
+*      INTO indxkey.
+*" Deleting any old key with similar to indxkey in cluster table
+*      CREATE OBJECT wf_obj." type ref to CL_ABAP_EXPIMP_DB.
+*      TRY.
+*          CALL METHOD wf_obj->delete
+*            EXPORTING
+*              tabname          = 'INDX'
+*              client           = sy-mandt
+*              area             = 'za'
+*              id               = indxkey
+*              client_specified = abap_true.
+*        CATCH cx_sy_client .
+*        CATCH cx_sy_generic_key .
+*        CATCH cx_sy_incorrect_key .
+*      ENDTRY.
+**Exporting to report ZMMRWHTO for TO print
+*      EXPORT int_serialno FROM int_serialno TO DATABASE indx(za)
+*      ID indxkey.
+*    ENDIF.
+*    CLEAR : wa_serialno,
+*    indxkey.
+
+  ENDMETHOD .
+
+
+  METHOD process_bg .
+
+    IF ( iv_indxkey IS NOT INITIAL ) .
+
+      IF ( me->go_log IS NOT BOUND ) .
+        me->go_log = NEW zcls_fi_ic_logger( iv_object     = me->gc_object
+                                            iv_sub_object = me->gc_subobject )  .
+      ENDIF .
+
+
+      IF ( me->go_log IS BOUND ) .
+
+        me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>info
+                                        id         = '>0'
+                                        number     = 0
+                                        message_v1 = 'Processing log of the background execution.' ) ) .
+
+        me->memory_import( iv_indxkey = iv_indxkey ) .
+
+        me->process( iv_testrun = iv_testrun ) .
       ENDIF .
 
     ENDIF .
@@ -961,58 +1157,157 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
 *
 *  ENDMETHOD .
 
+
+  METHOD memory_export .
+
+    DATA:
+      lt_data TYPE zclfi_remove_cp_dup=>tab_file,
+      lr_data TYPE RANGE OF but050-partner1.
+
+    APPEND LINES OF me->gt_data     TO lt_data .
+    APPEND LINES OF me->gt_range_bp TO lr_data .
+
+    " In this example we will export wf_data to INDX cluster database
+    " In other case we can export internal table etc also
+    indx-aedat = sy-datum.
+    indx-usera = sy-uname.
+    indx-pgmid = sy-repid.
+
+    rv_value = |ZFI·{ sy-datum }·{ sy-uzeit }| .
+    DATA(lv_key_table) = CONV indx-srtfd( |{ rv_value }{ me->gc_c_table }| ) .
+    DATA(lv_key_range) = CONV indx-srtfd( |{ rv_value }{ me->gc_c_range }| ) .
+
+    EXPORT lt_data FROM lt_data
+*    TO DATABASE indx(za) ID rv_value .
+    TO DATABASE indx(za) ID lv_key_table .
+
+    EXPORT lr_data FROM lr_data
+*    TO DATABASE indx(za) ID rv_value .
+    TO DATABASE indx(za) ID lv_key_range .
+
+  ENDMETHOD .
+
+
+  METHOD memory_import .
+
+    DATA:
+      lt_data TYPE zclfi_remove_cp_dup=>tab_file,
+      lr_data TYPE RANGE OF but050-partner1.
+
+    BREAK-POINT.
+
+    DATA(lv_key_table) = CONV indx-srtfd( |{ iv_indxkey }{ me->gc_c_table }| ) .
+    DATA(lv_key_range) = CONV indx-srtfd( |{ iv_indxkey }{ me->gc_c_range }| ) .
+
+    IMPORT lt_data TO lt_data FROM DATABASE indx(za) ID lv_key_table.
+*    IMPORT lt_data TO lt_data FROM DATABASE indx(za) ID iv_indxkey.
+    IF ( lines( lt_data ) GT 0 ) .
+      me->gt_data = lt_data .
+    ENDIF .
+
+    IMPORT lr_data TO lr_data FROM DATABASE indx(za) ID lv_key_range.
+*    IMPORT lr_data TO lr_data FROM DATABASE indx(za) ID iv_indxkey.
+    IF ( lines( lr_data ) GT 0 ) .
+      me->gt_range_bp = lr_data .
+    ENDIF .
+
+
+  ENDMETHOD .
+
+
+  METHOD memory_delete .
+
+    DELETE FROM DATABASE indx(za) ID iv_indxkey.
+
+  ENDMETHOD .
+
+
+  METHOD get_jobname .
+
+    CONSTANTS:
+      lc_jobname TYPE tbtcjob-jobname VALUE 'ZFI'.
+
+    CLEAR rv_value .
+
+    rv_value = |{ lc_jobname }-| &&
+               |{ sy-datum+6(2) }·{ sy-datum+4(2) }·{ sy-datum(4) }-| &&
+               |{ sy-uzeit(2) }·{ sy-uzeit+2(2) }·{ sy-uzeit+4(2) }| .
+
+  ENDMETHOD .
+
+
 ENDCLASS.
 
+DATA:
+  gv_exit TYPE char1 .
 
 SELECTION-SCREEN BEGIN OF BLOCK blc01 WITH FRAME TITLE text-001.
 PARAMETERS:
   p_flpath TYPE string LOWER CASE OBLIGATORY,
   p_test   TYPE char1 AS CHECKBOX DEFAULT 'X'.
-SELECTION-SCREEN END OF BLOCK blc01 .
 
+SELECTION-SCREEN BEGIN OF BLOCK blc02 WITH FRAME TITLE text-002.
+PARAMETERS:
+  p_backg TYPE char1 AS CHECKBOX,
+  p_debug TYPE char1  NO-DISPLAY,
+  p_key   TYPE  indx-srtfd NO-DISPLAY.
+SELECTION-SCREEN END OF BLOCK blc02 .
+
+SELECTION-SCREEN END OF BLOCK blc01 .
 
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_flpath.
   p_flpath = zclfi_remove_cp_dup=>get_filepath( ).
 
-
 INITIALIZATION.
-
 
 START-OF-SELECTION.
 
-  IF ( p_flpath IS NOT INITIAL ) . " Processamento em background
+  IF ( p_debug EQ abap_true ) . DO . IF ( gv_exit EQ abap_true ). EXIT. ENDIF . ENDDO . ENDIF .
 
-    DATA(lo_obj) = NEW zclfi_remove_cp_dup( ) .
+  DATA(lo_obj) = NEW zclfi_remove_cp_dup( ) .
 
-    IF ( lo_obj IS BOUND ) .
+  IF ( lo_obj IS BOUND ) .
 
-      BREAK-POINT .
+    IF ( p_flpath IS NOT INITIAL ) .
 
-      lo_obj->fill_data_from_file( iv_pathfile = p_flpath ) .
+      IF ( p_key IS INITIAL ) . " Processamento em background
 
-      IF ( lo_obj->is_valid_data( ) EQ abap_true ) .
+        lo_obj->fill_data_from_file( iv_pathfile = p_flpath ) .
 
-        lo_obj->process( iv_testrun = p_test ) .
+        CASE p_backg .
+
+          WHEN abap_false .
+
+            IF ( lo_obj->is_valid_data( ) EQ abap_true ) .
+              lo_obj->process( iv_testrun = p_test ) .
+            ELSE .
+              lo_obj->log_save( ) .
+            ENDIF .
+
+          WHEN abap_true .
+
+            lo_obj->prepare_bg( iv_testrun  = p_test
+                                iv_pathfile = p_flpath ) .
+
+          WHEN OTHERS .
+        ENDCASE .
+
+        lo_obj->log_display( ) .
 
       ELSE .
-
-        lo_obj->log_save( ) .
-
+        " background processment
+        lo_obj->process_bg( iv_testrun = p_test
+                            iv_indxkey = p_key ) .
       ENDIF .
-
-      lo_obj->log_display( ) .
-
-*      " Iniciar log de processamento
-*      zclsd_mr21_create_mass=>init_log( ).
-*      zclsd_mr21_create_mass=>shdb_fill_params( EXPORTING it_data   = gt_excel_data
-*                                                IMPORTING et_params = DATA(gt_params) ) .
-*      zclsd_mr21_create_mass=>shdb_execute( it_shdb_params = gt_params ).
-*      zclsd_mr21_create_mass=>save_log( ).
-*      zclsd_mr21_create_mass=>delete_file( p_fileap ) .
 
     ENDIF .
 
   ENDIF .
+
+
+END-OF-SELECTION .
+
+  FREE lo_obj .
 
 *  IF ( p_flpath IS NOT INITIAL ) . " Processamento em background
 *
