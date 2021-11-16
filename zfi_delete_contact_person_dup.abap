@@ -211,35 +211,32 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
         CATCH cx_sy_ref_is_initial ##NO_HANDLER .
       ENDTRY .
 
-      IF NOT lt_worksheets IS INITIAL.
-        READ TABLE lt_worksheets INTO DATA(lv_woksheetname) INDEX 1.
+      DATA(lo_data_ref) =
+        lo_excel_ref->if_fdt_doc_spreadsheet~get_itab_from_worksheet( VALUE #( lt_worksheets[ 1 ] OPTIONAL ) )  .
 
-        DATA(lo_data_ref) =
-         lo_excel_ref->if_fdt_doc_spreadsheet~get_itab_from_worksheet( lv_woksheetname )  .
-
+      IF ( lo_data_ref IS NOT INITIAL ) .
         "now you have excel work sheet data in dyanmic internal table
         ASSIGN lo_data_ref->* TO <fs_data> .
+      ENDIF .
 
-        IF ( lines( <fs_data>[] ) GT 0 ) .
+      IF ( lines( <fs_data>[] ) GT 0 ) .
 
-          me->gt_data =
-            VALUE #( FOR <fs_line> IN <fs_data> ( partner1 = |{ <fs_line>-a ALPHA = IN }|
-                                                  partner2 = |{ <fs_line>-b ALPHA = IN }|  ) ) .
+        me->gt_data =
+          VALUE #( FOR <fs_line> IN <fs_data> ( partner1 = |{ <fs_line>-a ALPHA = IN }|
+                                                partner2 = |{ <fs_line>-b ALPHA = IN }|  ) ) .
 
-          SORT me->gt_data ASCENDING BY partner1 .
-          DELETE ADJACENT DUPLICATES FROM me->gt_data COMPARING ALL FIELDS .
+        SORT me->gt_data ASCENDING BY partner1 .
+        DELETE ADJACENT DUPLICATES FROM me->gt_data COMPARING ALL FIELDS .
 
-          me->gt_range_bp =
-            VALUE #( FOR <fs_line> IN <fs_data> ( sign   = rsmds_c_sign-including
-                                                  option = rsmds_c_option-equal
-                                                  low    = CONV but050-partner1( <fs_line>-a ) ) ) .
+        me->gt_range_bp =
+          VALUE #( FOR <fs_line> IN <fs_data> ( sign   = rsmds_c_sign-including
+                                                option = rsmds_c_option-equal
+                                                low    = CONV but050-partner1( <fs_line>-a ) ) ) .
 
-          SORT me->gt_range_bp ASCENDING BY low .
-          DELETE ADJACENT DUPLICATES FROM me->gt_range_bp COMPARING low .
+        SORT me->gt_range_bp ASCENDING BY low .
+        DELETE ADJACENT DUPLICATES FROM me->gt_range_bp COMPARING low .
 
-        ENDIF .
-
-      ENDIF.
+      ENDIF .
 
     ENDIF .
 
@@ -338,6 +335,10 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
 *                                             message_v3 = 'has been updated as successful.' ) ) .
             ENDIF .
 
+            IF ( iv_testrun EQ abap_false ) .
+              CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' .
+            ENDIF .
+
           ENDIF .
 
           UNASSIGN <fs_but050> .
@@ -351,11 +352,8 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
                                           message_v3 = 'is not valid.' ) ) .
         ENDIF .
 
-      ENDLOOP .
 
-      IF ( iv_testrun EQ abap_false ) .
-        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' .
-      ENDIF.
+      ENDLOOP .
 
     ELSE .
       me->log_add( is_log =  VALUE #( type       = if_xo_const_message=>warning
@@ -396,15 +394,14 @@ CLASS zclfi_remove_cp_dup IMPLEMENTATION.
 
       IF ( sy-subrc EQ 0 ) .
 
-*     SUBMIT  zsd_mr21_create_mass_job
-        SUBMIT  yteste
-        WITH    p_flpath   = iv_pathfile
-        WITH    p_test     = iv_testrun
-        WITH    p_key      = lv_indxkey
-        WITH    p_debug    = lv_debug
-        VIA JOB lv_jobname
-        NUMBER  lv_count
-        AND RETURN .
+        SUBMIT  zfi_delete_contact_person_dup
+         WITH    p_flpath   = iv_pathfile
+         WITH    p_test     = iv_testrun
+         WITH    p_key      = lv_indxkey
+         WITH    p_debug    = lv_debug
+         VIA JOB lv_jobname
+         NUMBER  lv_count
+         AND RETURN .
 
         CALL FUNCTION 'JOB_CLOSE'
           EXPORTING
