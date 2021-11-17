@@ -3,6 +3,7 @@ REPORT zfi_delete_contact_person_dup MESSAGE-ID >0 .
 
 CLASS zclfi_remove_cp_dup DEFINITION FINAL CREATE PUBLIC .
 
+
   PUBLIC SECTION.
 
     METHODS construtctor ##CALLED.
